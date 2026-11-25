@@ -1,0 +1,163 @@
+<div id="storyboard-intake-ROOT">
+  <form>
+    <h2 data-copy="heading"></h2>
+    <p class="text-muted text-small" data-summary></p>
+    <div class="viz-controls" data-global></div>
+    <div class="viz-controls" data-batch hidden>
+      <button type="button" class="btn" data-lock data-copy="lock"></button>
+    </div>
+    <details data-shots>
+      <summary data-copy="shots"></summary>
+      <div data-rows></div>
+    </details>
+    <div class="viz-row">
+      <button class="btn btn-primary" type="submit" data-copy="submit"></button>
+      <span class="text-muted text-small" role="status"></span>
+    </div>
+    <p class="text-destructive" role="alert"></p>
+    <textarea data-fallback class="form-control" aria-label="Storyboard reply" rows="6" readonly hidden></textarea>
+  </form>
+</div>
+<style>
+  #storyboard-intake-ROOT form, #storyboard-intake-ROOT [data-rows] {
+    display: grid;
+    gap: calc(var(--font-size-base) * .7);
+  }
+  #storyboard-intake-ROOT [data-rows] { margin-top: calc(var(--font-size-base) * .7); }
+  #storyboard-intake-ROOT h3 { margin-bottom: calc(var(--font-size-base) * .35); }
+  #storyboard-intake-ROOT [hidden] { display: none !important; }
+</style>
+<script type="application/json" id="storyboard-data-ROOT">INTAKE_DATA</script>
+<script>
+(() => {
+  const root = document.getElementById("storyboard-intake-ROOT");
+  const data = JSON.parse(document.getElementById("storyboard-data-ROOT").textContent);
+  const copy = {
+    heading: "Complete storyboard details", shots: "Review or edit individual shots",
+    lock: "Set unanswered shots to locked", submit: "Submit and continue",
+    ratio: "Storyboard aspect ratio (width:height)", subjects: "Visible subjects",
+    description: "Subject action", shot_size: "Shot size", movement: "Camera movement",
+    locked: "Locked camera", example: "For example, track backward at floor level, then pan right",
+    missing: "Complete the remaining fields before submitting.",
+    ratioError: "Enter a valid aspect ratio, such as 9:16.", fallback: "Copy the reply below into this chat.",
+    title: "Submit storyboard details",
+  };
+  const form = root.querySelector("form");
+  const detail = root.querySelector("[data-shots]");
+  const status = root.querySelector('[role="status"]');
+  const error = root.querySelector('[role="alert"]');
+  const fallback = root.querySelector("[data-fallback]");
+  const submit = form.querySelector('[type="submit"]');
+  const fields = [];
+  for (const element of root.querySelectorAll("[data-copy]")) {
+    element.textContent = copy[element.dataset.copy];
+  }
+
+  function addInput(parent, label, kind) {
+    const wrapper = document.createElement("label");
+    wrapper.className = "form-label";
+    wrapper.append(document.createTextNode(label));
+    const input = document.createElement(kind);
+    input.className = "form-control";
+    if (kind === "textarea") input.rows = 2;
+    wrapper.append(input);
+    parent.append(wrapper);
+    return input;
+  }
+
+  const ratioInput = data.aspect_ratio ? null :
+    addInput(root.querySelector("[data-global]"), copy.ratio, "input");
+  if (ratioInput) ratioInput.placeholder = "16:9 / 9:16 / 2.39:1";
+  const rows = root.querySelector("[data-rows]");
+  for (const shot of data.shots) {
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+    heading.textContent = [shot.id, shot.title].filter(Boolean).join("  ");
+    const controls = document.createElement("div");
+    controls.className = "viz-controls";
+    section.append(heading, controls);
+    rows.append(section);
+    for (const name of shot.fields) {
+      const label = `${copy[name]} · ${shot.id}`;
+      const multiline = name === "description" || name === "movement";
+      const input = addInput(controls, label, multiline ? "textarea" : "input");
+      if (name === "movement") input.placeholder = copy.example;
+      fields.push({ id: shot.id, name, input });
+    }
+  }
+  detail.hidden = fields.length === 0;
+  detail.open = true;
+  root.querySelector("[data-summary]").textContent = [
+    data.aspect_ratio,
+    `${data.shots.length} shots with missing details`,
+  ].filter(Boolean).join(" · ");
+  const movements = fields.filter(field => field.name === "movement");
+  const lock = root.querySelector("[data-lock]");
+  root.querySelector("[data-batch]").hidden = movements.length < 2;
+
+  function incomplete(field) {
+    return !field.input.value.trim();
+  }
+
+  function updateStatus() {
+    const remaining = fields.filter(incomplete).length + (ratioInput && !ratioInput.value.trim() ? 1 : 0);
+    status.textContent = `${remaining} remaining`;
+    lock.disabled = movements.every(field => !incomplete(field));
+  }
+
+  lock.addEventListener("click", () => {
+    for (const field of movements) {
+      if (incomplete(field)) field.input.value = copy.locked;
+    }
+    error.textContent = "";
+    fallback.hidden = true;
+    updateStatus();
+  });
+  form.addEventListener("input", () => {
+    error.textContent = "";
+    fallback.hidden = true;
+    updateStatus();
+  });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    error.textContent = "";
+    if (ratioInput) {
+      const pair = ratioInput.value.split(":").map(Number);
+      if (pair.length !== 2 || pair.some(value => !Number.isFinite(value) || value <= 0)) {
+        error.textContent = copy.ratioError;
+        ratioInput.focus();
+        return;
+      }
+    }
+    const missing = fields.find(incomplete);
+    if (missing) {
+      detail.open = true;
+      error.textContent = copy.missing;
+      missing.input.focus();
+      return;
+    }
+    const values = new Map();
+    for (const {id, name, input} of fields) {
+      if (!values.has(id)) values.set(id, {id});
+      values.get(id)[name] = input.value.trim();
+    }
+    const payload = {shots: [...values.values()]};
+    if (ratioInput) payload.aspect_ratio = ratioInput.value.trim();
+    const prompt = `${copy.title}\n${JSON.stringify(payload, null, 2)}`;
+    submit.disabled = true;
+    try {
+      if (typeof window.openai?.sendFollowUpMessage !== "function") throw new Error();
+      await window.openai.sendFollowUpMessage({prompt, title: copy.title});
+    } catch {
+      fallback.value = prompt;
+      fallback.hidden = false;
+      fallback.focus();
+      fallback.select();
+      error.textContent = copy.fallback;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  updateStatus();
+})();
+</script>
